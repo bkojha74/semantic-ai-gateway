@@ -1,0 +1,5 @@
+{
+  "tenant_id": "az_wallet",
+  "model": "gemini-3.5-flash",
+  "prompt": "How do idempotency keys prevent double spending in digital wallets?"
+}

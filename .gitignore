@@ -1,0 +1,15 @@
+# Secrets & Local Environment
+.env
+.env.local
+
+# Compiled binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+
+# Test output
+*.out
+*.test
