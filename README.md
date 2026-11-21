@@ -130,7 +130,7 @@ curl -s -X POST http://localhost:8080/v1/generate \
 k6 run -e GATEWAY_URL=http://localhost:8080 scripts/loadtest.js
 ```
 
-### Deploy to GCP Cloud Run
+### Deploy to GCP Cloud Run (Manual Script)
 ```bash
 export PROJECT_ID="your-gcp-project-id"
 export REDIS_ADDR="your-redis-host:6379"
@@ -142,6 +142,43 @@ printf "%s" "mongodb+srv://<user>:<pass>@<cluster>.mongodb.net/?retryWrites=true
 chmod +x scripts/deploy_cloudrun.sh
 ./scripts/deploy_cloudrun.sh
 ```
+
+---
+
+## Automated CI/CD Pipeline (GitHub Actions)
+
+This repository includes a production-grade CI/CD pipeline using **GitHub Actions**:
+
+### 1. Continuous Integration (`.github/workflows/ci.yml`)
+Triggers on pull requests and pushes to `main`:
+- **Code Quality & Formatting:** Validates `gofmt` compliance, runs `go vet ./...`, and checks linting with `golangci-lint`.
+- **Unit & Concurrency Tests:** Runs the test suite with Go's race detector (`-race`) and generates atomic code coverage reports.
+- **Vulnerability Scanning:** Runs official Go `govulncheck` to catch known CVEs across all direct and transitive dependencies.
+- **Container Build Validation:** Tests multi-stage Docker build against [`deployments/Dockerfile`](deployments/Dockerfile) using Buildx cache.
+
+### 2. Continuous Delivery / Deployment (`.github/workflows/cd.yml`)
+Triggers automatically on merge to `main` (or via manual `workflow_dispatch` trigger):
+1. Runs the full CI validation job.
+2. Authenticates to Google Cloud via Workload Identity Federation (WIF) or Service Account key.
+3. Automatically ensures the Google Artifact Registry repository exists.
+4. Builds, tags (Git commit SHA + `latest`), and pushes the production container image.
+5. Deploys the service to **GCP Cloud Run** with automatic secret injection (`GEMINI_API_KEY`, `MONGO_URI`) and environment variable configuration (`REDIS_ADDR`).
+6. Verifies the deployment with an automated health check against `/healthz`.
+
+### Required GitHub Secrets & Variables
+
+Configure these in **GitHub Settings -> Secrets and variables -> Actions**:
+
+| Secret / Variable | Type | Description |
+|---|---|---|
+| `GCP_PROJECT_ID` | Secret | Google Cloud Project ID (e.g., `my-cloud-project`) |
+| `REDIS_ADDR` | Secret | Redis endpoint (e.g., Memorystore IP:6379 or Upstash host:port) |
+| `GCP_WIF_PROVIDER` | Secret | Workload Identity Provider resource name *(recommended)* |
+| `GCP_WIF_SERVICE_ACCOUNT` | Secret | Workload Identity Service Account email *(recommended)* |
+| `GCP_SA_KEY` | Secret | Service Account JSON key *(alternative fallback if not using WIF)* |
+| `GCP_REGION` | Variable | Cloud Run deployment region (defaults to `asia-south1`) |
+| `GCP_SERVICE_NAME` | Variable | Cloud Run service name (defaults to `semantic-ai-gateway`) |
+| `GCP_REPO_NAME` | Variable | Artifact Registry repo name (defaults to `ai-gateway-repo`) |
 
 ---
 

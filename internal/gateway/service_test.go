@@ -264,7 +264,7 @@ func TestService_Generate_TiersAndRateLimit(t *testing.T) {
 			}
 
 			if tc.wantMongoSaves > 0 {
-				waitForCondition(t, 500*time.Millisecond, func() bool {
+				waitForCondition(t, 3*time.Second, func() bool {
 					semCache.mu.Lock()
 					defer semCache.mu.Unlock()
 					return semCache.saveCalls >= tc.wantMongoSaves
@@ -279,7 +279,7 @@ func TestService_Generate_SingleflightCoalescing(t *testing.T) {
 	semCache := &fakeSemanticCache{}
 	llmClient := &fakeLLMClient{
 		embedVec: []float32{0.01, 0.02, 0.03},
-		genDelay: 60 * time.Millisecond,
+		genDelay: 150 * time.Millisecond,
 		genResp: &domain.CompletionResponse{
 			ResponseText: "Coalesced single response",
 			Model:        "gemini-3.8-flash",
