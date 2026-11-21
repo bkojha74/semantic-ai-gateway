@@ -1,0 +1,157 @@
+name: CD Pipeline - Deploy to Cloud Run
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment target environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: ${{ vars.GCP_REGION || 'asia-south1' }}
+  SERVICE_NAME: ${{ vars.GCP_SERVICE_NAME || 'semantic-ai-gateway' }}
+  REPO_NAME: ${{ vars.GCP_REPO_NAME || 'ai-gateway-repo' }}
+  GEMINI_SECRET_NAME: ${{ vars.GEMINI_SECRET_NAME || 'gemini-api-key' }}
+  MONGO_SECRET_NAME: ${{ vars.MONGO_SECRET_NAME || 'mongo-atlas-uri' }}
+  REDIS_ADDR: ${{ secrets.REDIS_ADDR }}
+
+jobs:
+  ci-check:
+    name: Run CI Validation
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    name: Build, Push & Deploy to Cloud Run
+    needs: [ ci-check ]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Required for Google Workload Identity Federation
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (WIF or Service Account Key)
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          # If using Workload Identity Federation:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
+          # Fallback if using standard Service Account JSON Key:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Set Image URI
+        id: image
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          IMAGE_BASE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.SERVICE_NAME }}"
+          echo "uri=${IMAGE_BASE}:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "latest=${IMAGE_BASE}:latest" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure Artifact Registry Exists
+        run: |
+          if ! gcloud artifacts repositories describe "${{ env.REPO_NAME }}" \
+            --location="${{ env.REGION }}" \
+            --project="${{ env.PROJECT_ID }}" >/dev/null 2>&1; then
+            echo "Creating Artifact Registry repository: ${{ env.REPO_NAME }}"
+            gcloud artifacts repositories create "${{ env.REPO_NAME }}" \
+              --repository-format=docker \
+              --location="${{ env.REGION }}" \
+              --description="Container images for Semantic AI Gateway" \
+              --project="${{ env.PROJECT_ID }}"
+          else
+            echo "Artifact Registry repository '${{ env.REPO_NAME }}' already exists."
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: deployments/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.image.outputs.uri }}
+            ${{ steps.image.outputs.latest }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy to Cloud Run
+        id: deploy
+        run: |
+          gcloud run deploy "${{ env.SERVICE_NAME }}" \
+            --image="${{ steps.image.outputs.uri }}" \
+            --region="${{ env.REGION }}" \
+            --platform=managed \
+            --allow-unauthenticated \
+            --port=8080 \
+            --cpu=1 \
+            --memory=512Mi \
+            --concurrency=80 \
+            --min-instances=0 \
+            --max-instances=10 \
+            --timeout=60s \
+            --set-env-vars="REDIS_ADDR=${{ env.REDIS_ADDR }}" \
+            --set-secrets="GEMINI_API_KEY=${{ env.GEMINI_SECRET_NAME }}:latest,MONGO_URI=${{ env.MONGO_SECRET_NAME }}:latest" \
+            --project="${{ env.PROJECT_ID }}"
+
+          SERVICE_URL=$(gcloud run services describe "${{ env.SERVICE_NAME }}" \
+            --region="${{ env.REGION }}" \
+            --project="${{ env.PROJECT_ID }}" \
+            --format='value(status.url)')
+          echo "service_url=${SERVICE_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Service Health Check
+        run: |
+          SERVICE_URL="${{ steps.deploy.outputs.service_url }}"
+          echo "Verifying health on: ${SERVICE_URL}/healthz"
+          
+          # Retry up to 5 times for startup
+          for i in {1..5}; do
+            RESPONSE=$(curl -sf -o /dev/null -w "%{http_code}" "${SERVICE_URL}/healthz" || true)
+            if [ "$RESPONSE" = "200" ]; then
+              echo "Health check passed with HTTP 200 OK!"
+              exit 0
+            fi
+            echo "Attempt $i: Received HTTP $RESPONSE. Waiting 5s..."
+            sleep 5
+          done
+
+          echo "Health check failed after 5 attempts"
+          exit 1
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          echo "### 🚀 Cloud Run Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service Name:** \`${{ env.SERVICE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Region:** \`${{ env.REGION }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image Tag:** \`${{ steps.image.outputs.uri }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service URL:** [${{ steps.deploy.outputs.service_url }}](${{ steps.deploy.outputs.service_url }})" >> $GITHUB_STEP_SUMMARY
+          echo "- **Health Endpoint:** \`${{ steps.deploy.outputs.service_url }}/healthz\`" >> $GITHUB_STEP_SUMMARY
