@@ -59,8 +59,10 @@ jobs:
           cache: true
 
       - name: Run Tests with Race Detector & Coverage
+        env:
+          GOTOOLCHAIN: local
         run: |
-          go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+          go test -v -race -coverprofile=coverage.out -coverpkg=./internal/... $(go list -f '{{if .TestGoFiles}}{{.ImportPath}}{{end}}' ./...)
 
       - name: Upload Test Coverage Artifact
         uses: actions/upload-artifact@v4
