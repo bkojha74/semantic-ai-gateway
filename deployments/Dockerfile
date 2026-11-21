@@ -1,5 +1,8 @@
 # Stage 1: Build binary
-FROM golang:1.24-alpine AS builder
+FROM golang:1.23-alpine AS builder
+
+# Install git and ca-certificates needed by go mod download in Alpine
+RUN apk add --no-cache git ca-certificates tzdata
 
 WORKDIR /src
 
